@@ -1,0 +1,6 @@
+sharkcode.exe
+*.exe~
+*.test
+.idea/
+.vscode/
+
