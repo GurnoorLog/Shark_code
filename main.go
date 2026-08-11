@@ -21,7 +21,7 @@ func main() {
 	fmt.Println()
 
 	m := tui.New(cfg, reg, ag)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithInputTTY(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "sharkcode:", err)
 		os.Exit(1)

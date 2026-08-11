@@ -36,11 +36,21 @@ type Response struct {
 	ToolCalls    []ToolCall
 	FinishReason string
 	Tokens       int
+	InputTokens  int
+	OutputTokens int
 }
 
 type Provider interface {
 	Name() string
+	Model() string
 	Chat(ctx context.Context, msgs []Message, tools []ToolDef) (*Response, error)
+}
+
+// Streamer is an optional capability: providers that support token
+// streaming call onDelta with each text chunk as it arrives, so the UI
+// can render the reply in real time.
+type Streamer interface {
+	ChatStream(ctx context.Context, msgs []Message, tools []ToolDef, onDelta func(string)) (*Response, error)
 }
 
 type Tool struct {

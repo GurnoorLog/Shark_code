@@ -27,6 +27,8 @@ func NewAnthropic(cfg *config.ProviderConfig) *Anthropic {
 
 func (p *Anthropic) Name() string { return "anthropic" }
 
+func (p *Anthropic) Model() string { return p.cfg.Model }
+
 type anMsg struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
@@ -159,7 +161,7 @@ func (p *Anthropic) Chat(ctx context.Context, msgs []Message, tools []ToolDef) (
 		return nil, fmt.Errorf("parse: %w", err)
 	}
 
-	out := &Response{FinishReason: ar.StopReason, Tokens: ar.Usage.InputTokens + ar.Usage.OutputTokens}
+	out := &Response{FinishReason: ar.StopReason, Tokens: ar.Usage.InputTokens + ar.Usage.OutputTokens, InputTokens: ar.Usage.InputTokens, OutputTokens: ar.Usage.OutputTokens}
 	for _, c := range ar.Content {
 		switch c.Type {
 		case "text":

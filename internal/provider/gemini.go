@@ -27,6 +27,8 @@ func NewGemini(cfg *config.ProviderConfig) *Gemini {
 
 func (p *Gemini) Name() string { return "gemini" }
 
+func (p *Gemini) Model() string { return p.cfg.Model }
+
 type gemPart struct {
 	Text            string            `json:"text,omitempty"`
 	FunctionCall    *gemFuncCall      `json:"functionCall,omitempty"`
@@ -53,9 +55,9 @@ type gemTool struct {
 }
 
 type gemReq struct {
-	Contents         []gemContent `json:"contents"`
-	SystemInstruction *gemPart    `json:"systemInstruction,omitempty"`
-	Tools            []gemTool    `json:"tools,omitempty"`
+	Contents          []gemContent `json:"contents"`
+	SystemInstruction *gemContent  `json:"systemInstruction,omitempty"`
+	Tools             []gemTool    `json:"tools,omitempty"`
 }
 
 type gemResp struct {
@@ -119,7 +121,7 @@ func (p *Gemini) Chat(ctx context.Context, msgs []Message, tools []ToolDef) (*Re
 
 	reqBody := gemReq{Contents: contents, Tools: gemTools}
 	if systemText != "" {
-		reqBody.SystemInstruction = &gemPart{Text: systemText}
+		reqBody.SystemInstruction = &gemContent{Parts: []gemPart{{Text: systemText}}}
 	}
 
 	body, _ := json.Marshal(reqBody)
@@ -153,7 +155,7 @@ func (p *Gemini) Chat(ctx context.Context, msgs []Message, tools []ToolDef) (*Re
 		return nil, fmt.Errorf("gemini: no candidates")
 	}
 
-	out := &Response{Tokens: gr.UsageMetadata.TotalTokenCount}
+	out := &Response{Tokens: gr.UsageMetadata.TotalTokenCount, InputTokens: gr.UsageMetadata.TotalTokenCount, OutputTokens: 0}
 	for _, part := range gr.Candidates[0].Content.Parts {
 		if part.Text != "" {
 			out.Content += part.Text
