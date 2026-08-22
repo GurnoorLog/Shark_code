@@ -152,6 +152,12 @@ var (
 			Background(lipgloss.Color("#0e4a57"))
 )
 
+// SharkMark is the compact one-line shark used on terminals too short for
+// the full braille art — keeps the theme without crowding the controls.
+func SharkMark() string {
+	return lipgloss.NewStyle().Foreground(Teal).Bold(true).Render(">≈((((º>")
+}
+
 // SharkLogo renders a detailed ASCII great white for the welcome screen.
 func SharkLogo() string {
 	rows := []string{

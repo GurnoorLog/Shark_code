@@ -227,7 +227,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Slash-command autocomplete menu.
-		if matches := m.menuMatches(); len(matches) > 0 {			switch msg.String() {
+		if matches := m.menuMatches(); len(matches) > 0 {
+			switch msg.String() {
 			case "ctrl+c":
 				if m.busy {
 					if m.cancel != nil {
@@ -248,12 +249,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.autoIdx++
 				}
 				return m, nil
-			case "enter":
+			case "tab", "enter":
 				m.applyCommand(matches[m.autoIdx])
 				return m, nil
 			case "backspace":
 				if len(m.input) > 0 {
-					m.input = m.input[:len(m.input)-1]
+					rs := []rune(m.input)
+					m.input = string(rs[:len(rs)-1])
 				}
 				m.autoIdx = 0
 				return m, nil
@@ -334,7 +336,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.submit(line)
 		case "backspace":
 			if len(m.input) > 0 {
-				m.input = m.input[:len(m.input)-1]
+				rs := []rune(m.input)
+				m.input = string(rs[:len(rs)-1])
 			}
 			return m, nil
 		case "esc":
@@ -548,13 +551,16 @@ func (m *model) submit(line string) tea.Cmd {
 	// Permission gate: before the agent touches anything, ask the user.
 	// The callback blocks (in the agent goroutine) until the UI answers.
 	m.ag.Confirm = func(req agent.ConfirmRequest) bool {
+		reply := make(chan bool, 1)
+		// Register the reply channel BEFORE announcing the request, so the
+		// modal renders on the very first frame of the event (no flicker).
+		m.confirmReply = reply
 		select {
 		case ch <- turnEventMsg{ev: agent.TurnEvent{Type: "confirm", Tool: req.Tool, Text: req.Args}}:
 		case <-ctx.Done():
+			m.confirmReply = nil
 			return false
 		}
-		reply := make(chan bool, 1)
-		m.confirmReply = reply
 		select {
 		case ok := <-reply:
 			return ok
@@ -762,7 +768,11 @@ func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	rs := []rune(s)
+	if len(rs) <= n {
+		return s
+	}
+	return string(rs[:n]) + "..."
 }
 
 // displayUserText renders what the user sent in the chat log. Long pasted
@@ -778,7 +788,11 @@ func displayUserText(s string) string {
 		// show the first line plus a collapse marker
 		first := strings.TrimSpace(lines[0])
 		if len(first) > 80 {
-			first = first[:80] + "…"
+			fr := []rune(first)
+			if len(fr) > 80 {
+				first = string(fr[:80])
+			}
+			first += "…"
 		}
 		return fmt.Sprintf("pasted %d lines · %d chars\n%s", len(lines), len(s), first)
 	}
@@ -824,19 +838,25 @@ func (m *model) View() string {
 
 	welcome := !m.picker && !m.busy && !m.hasChat()
 
-	var overlay []string
 	if welcome {
-		overlay = m.welcomeLines()
-	}
-
-	if welcome {
-		start := (len(bg) - len(overlay)) / 2
+		// Flatten every element to single physical lines FIRST. Writing a
+		// multi-line string (the logo!) into one bg row injects raw newlines
+		// into the frame, shifting all later rows down and leaving unstyled
+		// black bands at the bottom of the screen.
+		overlay := m.welcomeLines()
+		var flat []string
+		for _, l := range overlay {
+			flat = append(flat, strings.Split(l, "\n")...)
+		}
+		// Slightly above optical center looks better than dead-center.
+		start := (len(bg) - len(flat)) * 2 / 5
 		if start < 0 {
 			start = 0
 		}
-		for i, line := range overlay {
-			if start+i < len(bg) {
-				bg[start+i] = m.seaLine(line, start+i)
+		for i, line := range flat {
+			row := start + i
+			if row >= 0 && row < len(bg) {
+				bg[row] = m.seaLine(line, row)
 			}
 		}
 	} else {
@@ -900,8 +920,12 @@ func (m *model) View() string {
 			start = 0
 		}
 		for i, pl := range pickLines {
-			if start+i < len(bg) {
-				bg[start+i] = pl
+			row := start + i
+			if row >= 0 && row < len(bg) {
+				// Back the picker with the sea: the box is narrower than
+				// the terminal, and raw placement would leave unstyled
+				// black bands on both sides of it.
+				bg[row] = m.seaLine(pl, row)
 			}
 		}
 	}
@@ -917,7 +941,9 @@ func (m *model) View() string {
 		for i, ml := range modalLines {
 			row := start + i
 			if row >= 0 && row < len(bg) {
-				bg[row] = ml
+				// Same sea-backing as the picker — center() pads with
+				// plain spaces that would otherwise render black.
+				bg[row] = m.seaLine(ml, row)
 			}
 		}
 	}
@@ -958,6 +984,12 @@ func (m *model) seaTo(line string, y, width int) string {
 	if tw < 0 {
 		tw = 0
 	}
+	// Never let a row overflow: a wrapped line shifts everything below it
+	// and shows unstyled black at the screen edges.
+	if width > 0 && tw > width {
+		line = ansi.Truncate(line, width, "")
+		tw = width
+	}
 	col := m.water.bgFor(y)
 
 	var styled string
@@ -981,6 +1013,8 @@ func (m *model) seaTo(line string, y, width int) string {
 }
 
 // welcomeLines builds the centered landing view (opencode-style).
+// Every element is a single logical block; View() flattens embedded
+// newlines before placing lines into background rows.
 func (m *model) welcomeLines() []string {
 	p := m.cfg.Active()
 	modelName := "none"
@@ -988,31 +1022,68 @@ func (m *model) welcomeLines() []string {
 		modelName = p.Model
 	}
 
-	input := PromptStyle.Render("> ") + BodyStyle.Render(m.input+"▌")
+	// Input line with an opencode-style placeholder when empty.
+	var input string
+	if m.input == "" {
+		input = PromptStyle.Render("> ") + HintStyle.Render("describe a task and press enter") + BodyStyle.Render("▌")
+	} else {
+		input = PromptStyle.Render("> ") + BodyStyle.Render(m.input+"▌")
+	}
 
 	title := TitleStyle.Render("SHARKCODE")
 	tagline := TaglineStyle.Render(m.tagline())
 
 	cmdline := HintStyle.Render("/model · /key · /providers · /clear · /help · /exit")
+	keys := HintStyle.Render("enter send · tab plan/build · ↑↓ history · esc esc cancel")
 	status := HintStyle.Render(fmt.Sprintf("currently: %s (%s)", m.cfg.ActiveProvider, modelName))
 
+	logo := SharkLogo()
+	ctxLine := center(HintStyle.Render(m.contextLine()), m.width)
+
+	// Core controls (no art). Order: title → input → help → status.
+	core := []string{
+		center(title, m.width),
+		center(tagline, m.width),
+		"",
+		center(input, m.width),
+		"",
+		center(cmdline, m.width),
+		center(keys, m.width),
+		ctxLine,
+		center(status, m.width),
+	}
+
+	// Pick the richest variant that physically fits the terminal so no
+	// row ever spills past the bottom edge (that's what caused black bands).
+	count := func(ls []string) int {
+		n := 0
+		for _, l := range ls {
+			n += len(strings.Split(l, "\n"))
+		}
+		return n
+	}
 	var lines []string
-	lines = append(lines, "")
-	lines = append(lines, center(SharkLogo(), m.width))
-	lines = append(lines, "")
-	lines = append(lines, center(title, m.width))
-	lines = append(lines, center(tagline, m.width))
-	lines = append(lines, "")
-	lines = append(lines, center(input, m.width))
-	lines = append(lines, center(cmdline, m.width))
-	lines = append(lines, center(HintStyle.Render(m.contextLine()), m.width))
-	lines = append(lines, center(status, m.width))
+	mark := center(SharkMark(), m.width)
+	full := append([]string{"", logo, ""}, core...)
+	withMark := append([]string{mark, ""}, core...)
+	textOnly := []string{
+		core[0], core[1], "",
+		core[3], "",
+		core[5], core[6],
+		center(status, m.width),
+	}
+	switch {
+	case m.height <= 0 || count(full) <= m.height:
+		lines = full
+	case count(withMark) <= m.height:
+		lines = withMark
+	default:
+		lines = textOnly
+	}
 
 	if matches := m.menuMatches(); len(matches) > 0 {
 		lines = append(lines, "")
-		for _, ml := range strings.Split(m.renderMenu(matches), "\n") {
-			lines = append(lines, center(ml, m.width))
-		}
+		lines = append(lines, m.renderMenu(matches))
 	}
 	return lines
 }
@@ -1085,12 +1156,21 @@ func (m *model) statusBar() string {
 		m.modeName(), formatInt(total), used, u.CostUSD)
 	right := fmt.Sprintf("gate %s · %s", gate, modelName)
 
-	filler := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
+	need := lipgloss.Width(left) + lipgloss.Width(right) + 2
+	filler := m.width - need
+	if filler < 0 {
+		// Bar longer than the terminal (long model name): trim the right
+		// side so the row never wraps — a wrapped status bar shifts the
+		// whole frame and shows black at the bottom edge.
+		right = ansi.Truncate(right, max(0, m.width-lipgloss.Width(left)-3), "…")
+		filler = m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
+	}
 	if filler < 0 {
 		filler = 0
 	}
 	space := lipgloss.NewStyle().Background(DeepBG).Render(strings.Repeat(" ", filler))
-	return StatusBar.Render(" ") + StatusBar.Render(left) + space + StatusBar.Render(right) + " "
+	// Every cell styled — even the padding — or it renders as black.
+	return StatusBar.Render(" "+left) + space + StatusBar.Render(right+" ")
 }
 
 func formatInt(n int) string {
