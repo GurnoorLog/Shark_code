@@ -29,10 +29,19 @@ func TestPanelContentRows(t *testing.T) {
 	if len(panel) != 40 {
 		t.Fatalf("panel rows = %d, want 40", len(panel))
 	}
+	nonEmpty := 0
 	for i, row := range panel {
-		if lipgloss.Width(row) < m.sidebar() {
-			t.Errorf("panel row %d width %d < sidebar %d", i, lipgloss.Width(row), m.sidebar())
+		w := lipgloss.Width(row)
+		if row == "" || w == 0 {
+			continue // water rows: bubbles pass through
 		}
+		nonEmpty++
+		if w > m.sidebar() {
+			t.Errorf("panel row %d width %d exceeds sidebar band %d", i, w, m.sidebar())
+		}
+	}
+	if nonEmpty < 5 {
+		t.Fatalf("expected a real info box, got %d content rows", nonEmpty)
 	}
 }
 

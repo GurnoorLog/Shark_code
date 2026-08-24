@@ -887,21 +887,25 @@ func (m *model) View() string {
 		// Build the right info panel once per frame.
 		panel := m.panelContent(len(bg))
 
-		// Draw header pinned at the top.
-		bg[0] = m.renderRow(header, 0, panel)
-		// Draw scrollable content.
-		row := 1
-		for _, line := range body {
-			if row < footerStart && row < len(bg) {
-				bg[row] = m.renderRow(line, row, panel)
+		// Compose EVERY row through renderRow so the floating info box is
+		// continuous down the screen and the sea backs all of them.
+		// (Drawing only content rows made the panel stop where the chat
+		// log ended.)
+		if len(bg) > 0 {
+			bg[0] = m.renderRow(header, 0, panel)
+		}
+		for i := 1; i < footerStart && i < len(bg); i++ {
+			line := ""
+			if i-1 < len(body) {
+				line = body[i-1]
 			}
-			row++
+			bg[i] = m.renderRow(line, i, panel)
 		}
 		// Anchor the input footer at the bottom, above the status bar.
-		row = footerStart
-		for _, line := range footer {
-			if row < len(bg) {
-				bg[row] = m.renderRow(line, row, panel)
+		row := footerStart
+		for _, fl := range footer {
+			if row >= 0 && row < len(bg) {
+				bg[row] = m.renderRow(fl, row, panel)
 			}
 			row++
 		}
@@ -959,21 +963,21 @@ func (m *model) seaLine(line string, y int) string {
 }
 
 // renderRow lays out one terminal row with the sea behind it: the chat
-// content occupies the left band (up to chatWidth) and the info panel the
-// right. panel is the pre-rendered slice from panelContent.
+// content occupies the left band (up to chatWidth) and the info box floats
+// on water in the right band. Empty panel rows stay pure water so bubbles
+// rise past the box.
 func (m *model) renderRow(line string, y int, panel []string) string {
 	side := m.sidebar()
 	if side <= 0 {
 		return m.seaLine(line, y)
 	}
 	left := m.seaTo(line, y, m.chatWidth())
-	right := ""
-	if y >= 0 && y < len(panel) {
-		right = panel[y]
-	} else {
-		right = m.water.Seg(y, m.chatWidth(), m.width)
+	if y >= 0 && y < len(panel) && panel[y] != "" {
+		// seaTo backs the box line with water and fills whatever is left
+		// of the band, so bubbles flow behind and beside it.
+		return left + m.seaTo(panel[y], y, side)
 	}
-	return left + right
+	return left + m.water.Seg(y, m.chatWidth(), m.width)
 }
 
 // seaTo renders text on the sea background with the sea filling the band

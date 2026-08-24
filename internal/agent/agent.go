@@ -5,7 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
+
 	"log"
 
 	"shark-agent/internal/provider"
@@ -13,15 +18,10 @@ import (
 
 const SystemPrompt = `You are SHARKCODE, a terminal coding agent that runs in the user's terminal. You act like a senior engineer sitting next to them: you plan, run commands, inspect output, and fix problems yourself.
 
-## IMPORTANT: You are on Windows
-- The machine runs Windows. Your "bash" tool actually invokes cmd.exe (Windows Command Prompt), NOT bash.
-- Windows commands DO NOT support: which, ls, cat, cp, mv, rm -rf, mkdir -p, touch, apt, apt-get, brew, yum, dnf, grep (as a standalone), pwd.
-- Use Windows equivalents: whoami instead of whoami (keep), dir instead of ls, type instead of cat, copy instead of cp, move instead of mv, del instead of rm, mkdir instead of mkdir -p, echo. > file instead of touch.
-- NEVER try to install bash or use apt/brew/yum. There is no package manager comparable to Linux here. Do not attempt to bootstrap a Unix shell.
-- Paths: use backslashes with the read_file/write_file/list_dir/glob/grep tools. "~/folder" is auto-expanded to the user home by those tools. In the bash tool use $HOME or a full path like C:\Users\<name>.
-- CRITICAL: the bash tool runs cmd.exe. cmd.exe does NOT expand "~" — a command like mkdir -p ~\Desktop\... will FAIL with "The system cannot find the path specified" or create a literal "~" folder. NEVER use "~" in a bash command. Always use the absolute Windows path from "This machine" above.
-- mkdir does NOT need -p in cmd; just "mkdir C:/full/path". If mkdir says "already exists" that is fine — the folder exists. Do not treat it as an error to retry forever; move on and write the file.
-- If a command fails, read the error; it is often a Windows-vs-Unix confusion. Try the Windows equivalent instead of installing anything.
+## First understand the machine
+- Before doing real work on an unfamiliar task, ground yourself: check the OS facts below and inspect the working directory (list_dir) before touching files.
+- If you need more system detail (distro, shell version, installed tools), run a quick read-only command to find out. Never assume; verify.
+- If a tool or command goes wrong, TELL the user what failed in one line, then try a different approach. Do not stop the whole task because one step failed, and do not silently retry the identical failing thing.
 
 ## How you work
 - Use your tools to ground every claim. Never guess about the filesystem, environment, or commands.
@@ -50,7 +50,7 @@ The ladder runs AFTER you understand the problem, never instead of it: read the 
 ## Tool rules
 - Read files before modifying them.
 - Verify your work when possible (run tests, list the directory, show the file you wrote).
-- Prefer read_file/write_file/list_dir/glob/grep over shell for file operations; they are Windows-safe.
+- Prefer read_file/write_file/list_dir/glob/grep over shell for file operations; they behave the same on every OS.
 - You have internet access via web_search (find results/URLs), web_fetch (read a page's text), and download_file (save a binary like an image/font/zip to disk). Use web_search ONLY for concrete needs: real image URLs, documentation, JS/CDN links, or exact code you cannot recall. Do NOT web_search "for inspiration" or "for the best design" — inspiration is not output, and searching for it wastes turns. Pick a strong design yourself and build it; if external images are needed, web_search for working source URLs and cite them.
 - BINARIES: to place an image (.jpg/.png/.gif/.svg/.webp) or font or zip in your project, call download_file with the real URL and a target path. NEVER pass "[Binary Data]" or "[image]" text to write_file — write_file is TEXT ONLY and will refuse binary markers. edit_file is for text edits in existing files; it takes path/old_string/new_string — it cannot fetch URLs.
 
@@ -93,10 +93,87 @@ Approve when it improves overall health even if imperfect; don't leave the codeb
 Never ask permission to run a read-only or inspection command.
 `
 
-// buildSystemPrompt injects the real environment facts (home dir, cwd,
-// username) so the model never has to guess them — a common source of
-// "Access is denied" failures from invented paths like C:\Users\<wrongname>.
-func buildSystemPrompt() string {
+// Platform guidance injected after the base prompt so the model gets the
+// right shell idioms for whatever machine it's running on.
+const windowsSection = `## You are on Windows
+- The "bash" tool actually invokes cmd.exe (Command Prompt), NOT bash.
+- cmd.exe does NOT support: ls, cat, cp, mv, rm -rf, mkdir -p, touch, which, grep (standalone), pwd, apt/brew/yum.
+- Use Windows equivalents: dir, type, copy, move, del, rmdir /s /q, mkdir. Common translations are applied automatically, but write native commands when you can.
+- NEVER use "~" in a bash command: cmd.exe does not expand it. Use the absolute home path from "This machine" below.
+- If mkdir says "already exists", the folder exists; that is fine, move on.`
+
+const darwinSection = `## You are on macOS
+- The "bash" tool runs commands through /bin/sh on a Unix system; standard tools work: ls, cat, grep, cp, mv, rm -rf, mkdir -p, touch, which, pwd.
+- "~" expands to the real home directory below. Prefer forward-slash paths everywhere.
+- Only reach for brew when something genuinely needs installing; prefer what already exists.`
+
+const linuxSection = `## You are on Linux
+- The "bash" tool runs commands through /bin/sh on a Unix system; standard tools work: ls, cat, grep, cp, mv, rm -rf, mkdir -p, touch, which, pwd.
+- "~" expands to the real home directory below. Prefer forward-slash paths everywhere.
+- Only use the distro package manager (apt/dnf/pacman) when something genuinely needs installing; prefer what already exists.`
+
+func platformSection() string {
+	switch runtime.GOOS {
+	case "windows":
+		return windowsSection
+	case "darwin":
+		return darwinSection
+	default:
+		return linuxSection
+	}
+}
+
+// shellName reports which shell the bash tool will actually drive.
+func shellName() string {
+	if runtime.GOOS == "windows" {
+		return "cmd.exe"
+	}
+	if s := os.Getenv("SHELL"); s != "" {
+		return filepath.Base(s)
+	}
+	return "sh"
+}
+
+// detectOSVersion runs one cheap, read-only probe for an authoritative OS
+// string so the model starts from reality instead of guessing the platform.
+func detectOSVersion() string {
+	switch runtime.GOOS {
+	case "windows":
+		return runProbe("cmd", "/c", "ver")
+	case "darwin":
+		if out := runProbe("sw_vers"); out != "" {
+			return out
+		}
+		return runProbe("uname", "-mr")
+	default:
+		if data, err := os.ReadFile("/etc/os-release"); err == nil {
+			for _, ln := range strings.Split(string(data), "\n") {
+				if strings.HasPrefix(ln, "PRETTY_NAME=") {
+					return strings.Trim(strings.TrimPrefix(ln, "PRETTY_NAME="), `"`)
+				}
+			}
+		}
+		return runProbe("uname", "-sr")
+	}
+}
+
+// runProbe executes a command with a short timeout; failures are silent
+// because the probe is a nice-to-have, never a requirement.
+func runProbe(name string, args ...string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, name, args...).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// buildSystemPrompt injects the platform guidance plus the real environment
+// facts (OS version, shell, home dir, cwd, username) so the model never has
+// to guess them — a common source of "Access is denied" failures from
+// invented paths like C:\Users\<wrongname>.
+func (a *Agent) buildSystemPrompt() string {
 	home, _ := os.UserHomeDir()
 	cwd, _ := os.Getwd()
 	user := os.Getenv("USERNAME")
@@ -106,13 +183,35 @@ func buildSystemPrompt() string {
 
 	var b strings.Builder
 	b.WriteString(SystemPrompt)
+	b.WriteString("\n")
+	b.WriteString(platformSection())
 	b.WriteString("\n\n## This machine (authoritative, do not guess)\n")
+	b.WriteString(fmt.Sprintf("- Operating system: %s (%s)\n", runtime.GOOS, runtime.GOARCH))
+	b.WriteString(fmt.Sprintf("- Shell used by the bash tool: %s\n", shellName()))
 	b.WriteString(fmt.Sprintf("- Real home directory: %s\n", home))
 	b.WriteString(fmt.Sprintf("- Real current working directory: %s\n", cwd))
-	b.WriteString(fmt.Sprintf("- Real Windows username: %s\n", user))
+	b.WriteString(fmt.Sprintf("- Real username: %s\n", user))
+	b.WriteString(a.probeFacts())
 	b.WriteString("- Use these EXACT paths above. Never invent a username or folder.\n")
-	b.WriteString("- Example that will FAIL: C:\\Users\\<wrongname>\\Desktop\\... The home dir is the real one above.\n")
+	b.WriteString("- Example that will FAIL on Windows: C:\\Users\\<wrongname>\\Desktop\\... The home dir is the real one above.\n")
 	b.WriteString("- When a mkdir/write fails with access denied, check you used the real home dir and that the parent folder exists.\n")
+	return b.String()
+}
+
+// probeFacts caches the one-time OS version probe on the agent.
+func (a *Agent) probeFacts() string {
+	if !a.sysProbed {
+		a.sysProbe = detectOSVersion()
+		a.sysProbed = true
+	}
+	if a.sysProbe == "" {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "- OS version:\n")
+	for _, ln := range strings.Split(a.sysProbe, "\n") {
+		fmt.Fprintf(&b, "    %s\n", ln)
+	}
 	return b.String()
 }
 
@@ -139,6 +238,14 @@ type Agent struct {
 	// The accuracy gate only runs after tool-using turns.
 	usedTools bool
 
+	// failStreak counts consecutive failed tool calls so the agent can be
+	// nudged to change approach instead of retrying the same thing forever.
+	failStreak int
+
+	// sysProbe caches the one-time OS version probe for the system prompt.
+	sysProbe   string
+	sysProbed  bool
+
 	// Confirm, if set, is called before each tool executes. It may block
 	// (e.g. waiting for the user to approve). Returning false skips the
 	// tool and tells the model the action was denied.
@@ -156,7 +263,7 @@ func New(reg *provider.Registry) *Agent {
 	return &Agent{
 		reg:      reg,
 		tools:    tools,
-		maxSteps: 25,
+		maxSteps: 40,
 		Verify:   true,
 	}
 }
@@ -222,7 +329,7 @@ func parseArgs(raw string) map[string]any {
 
 func (a *Agent) Turn(ctx context.Context, userMsg string, onEvent func(TurnEvent)) (string, error) {
 	if len(a.messages) == 0 {
-		a.messages = append(a.messages, provider.Message{Role: provider.RoleSystem, Content: buildSystemPrompt()})
+		a.messages = append(a.messages, provider.Message{Role: provider.RoleSystem, Content: a.buildSystemPrompt()})
 	}
 	// In plan mode, prefix the user prompt with plan-only instructions so
 	// the guidance lives in this turn's request and doesn't linger in the
@@ -268,6 +375,17 @@ func (a *Agent) Turn(ctx context.Context, userMsg string, onEvent func(TurnEvent
 	return content, nil
 }
 
+// safeCall runs a tool and converts a panic into a normal error so one
+// bad tool call can never take down the whole app.
+func safeCall(fn func(context.Context, map[string]any) (string, error), ctx context.Context, args map[string]any) (res string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("tool crashed: %v", r)
+		}
+	}()
+	return fn(ctx, args)
+}
+
 // runLoop drives the model call -> tool execution loop until a plain
 // text answer is produced or the step budget is exhausted.
 func (a *Agent) runLoop(ctx context.Context, prov provider.Provider, onEvent func(TurnEvent), emitToolEvents bool) (string, error) {
@@ -296,12 +414,16 @@ func (a *Agent) runLoop(ctx context.Context, prov provider.Provider, onEvent fun
 			}
 			resp, err = call()
 			if err != nil {
-				// Transient errors (network, 429, server overload) are
-				// worth one retry too, but not forever.
-				if attempt < 1 {
+				// Transient errors (network, 429, server overload) get
+				// retried with backoff instead of killing the turn.
+				if attempt < 2 && ctx.Err() == nil {
+					if onEvent != nil {
+						onEvent(TurnEvent{Type: "think", Text: fmt.Sprintf("provider hiccup (%s) — retrying...", short(err.Error(), 60))})
+					}
+					time.Sleep(time.Duration(attempt+1) * 800 * time.Millisecond)
 					continue
 				}
-				return "", err
+				return "", fmt.Errorf("provider %s unreachable after retries: %w", prov.Name(), err)
 			}
 			if strings.TrimSpace(resp.Content) != "" || len(resp.ToolCalls) > 0 || attempt >= 2 {
 				break
@@ -352,9 +474,20 @@ func (a *Agent) runLoop(ctx context.Context, prov provider.Provider, onEvent fun
 			}
 			a.usedTools = true
 			args := parseArgs(tc.Arguments)
-			result, err := fn(ctx, args)
+			result, err := safeCall(fn, ctx, args)
 			if err != nil {
+				a.failStreak++
 				result = "tool error: " + err.Error()
+				// After repeated failures tell the model to change tack
+				// instead of hammering the same call — and tell the user.
+				if a.failStreak >= 3 {
+					if onEvent != nil && emitToolEvents {
+						onEvent(TurnEvent{Type: "think", Text: fmt.Sprintf("%s failed %d times — switching approach", tc.Name, a.failStreak)})
+					}
+					result += fmt.Sprintf("\n(note: %d tool calls failed in a row. Stop repeating the same call. Diagnose first: read the error, verify the path/input exists with list_dir or read_file, or use a different command/tool.)", a.failStreak)
+				}
+			} else {
+				a.failStreak = 0
 			}
 			if emitToolEvents && onEvent != nil {
 				onEvent(TurnEvent{Type: "tool_result", Tool: tc.Name, Result: result})
@@ -365,7 +498,13 @@ func (a *Agent) runLoop(ctx context.Context, prov provider.Provider, onEvent fun
 		}
 	}
 
-	return "", fmt.Errorf("max steps (%d) reached", a.maxSteps)
+	// Step budget exhausted: tell the user instead of hard-failing the
+	// turn, so any progress made so far stays visible and they can ask
+	// us to continue.
+	if onEvent != nil {
+		onEvent(TurnEvent{Type: "error", Text: fmt.Sprintf("hit the step budget (%d steps). Task paused, not failed — say \"continue\" to keep going.", a.maxSteps)})
+	}
+	return "", nil
 }
 
 // GetModel returns the active provider/model name for display.

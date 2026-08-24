@@ -5,11 +5,12 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
-// sidebar returns the column width of the right info panel. It shrinks on
-// narrow terminals and disappears entirely below ~78 columns so the chat
-// band never gets crushed.
+// sidebar returns the column width of the right info panel band. It
+// shrinks on narrow terminals and disappears entirely below ~78 columns
+// so the chat band never gets crushed.
 func (m *model) sidebar() int {
 	switch {
 	case m.width >= 150:
@@ -29,9 +30,10 @@ func (m *model) chatWidth() int {
 	return m.width - m.sidebar()
 }
 
-// panelContent builds the right info panel: context usage, model, mode,
-// gate and a couple of cheeky shark lines (opencode-style side panel).
-// It returns one styled line per visible chat row, with empty trailing rows.
+// panelContent builds the right info box: context usage, model, mode and
+// gate inside a rounded border that FLOATS on the water. There is no solid
+// slab behind it: rows without content come back as "" and renderRow fills
+// them with live water, so bubbles rise behind and around the box.
 func (m *model) panelContent(h int) []string {
 	side := m.sidebar()
 	if side <= 0 || h <= 0 {
@@ -62,61 +64,52 @@ func (m *model) panelContent(h int) []string {
 		modelName = p.Model
 	}
 
-	var lines []string
-	title := " " + SharkChip.Render("🦈 shark")
-	lines = append(lines, lipgloss.NewStyle().Background(PanelBG).Render(title))
+	// Everything inside the box must fit within side-4 columns (border +
+	// padding), or the box would grow into the chat band.
+	innerMax := side - 4 - 2 // border(2) + padding(2)
+	if innerMax < 8 {
+		innerMax = 8
+	}
+	fit := func(s string) string { return ansiTrunc(s, innerMax) }
 
-	label := func(s string) string {
-		return " " + lipgloss.NewStyle().
-			Foreground(Bubble).
-			Bold(true).
-			Background(PanelBG).
-			Render(s)
-	}
-	val := func(s string) string {
-		return "  " + lipgloss.NewStyle().Foreground(White).Background(PanelBG).Render(s)
-	}
-	dim := func(s string) string {
-		return "  " + lipgloss.NewStyle().Foreground(Bubble).Background(PanelBG).Render(s)
-	}
-
-	// progress bar for context usage, opencode-style.
-	barW := side - 6
-	if barW < 4 {
-		barW = 4
-	}
+	barW := innerMax
 	fill := barW * used / 100
-	bar := strings.Repeat("█", fill) + strings.Repeat("░", barW-fill)
+	track := lipgloss.NewStyle().Foreground(lipgloss.Color("#16405e"))
+	bar := PanelBar.Render(strings.Repeat("█", fill)) + track.Render(strings.Repeat("░", barW-fill))
 
-	lines = append(lines, label("context"))
-	lines = append(lines, val(fmt.Sprintf("%s tokens", formatInt(total))))
-	lines = append(lines, val(fmt.Sprintf("%d%% used", used)))
-	lines = append(lines, dim("$"+fmt.Sprintf("%.2f", u.CostUSD)+" spent"))
-	lines = append(lines, " "+lipgloss.NewStyle().Foreground(Teal).Background(PanelBG).Render(bar))
+	var lines []string
+	lines = append(lines, fit(SharkChip.Render(" 🦈 shark ")))
+	lines = append(lines, "")
+	lines = append(lines, PanelLabel.Render("context"))
+	lines = append(lines, PanelValue.Render(fmt.Sprintf("%s tok · %d%%", formatInt(total), used)))
+	lines = append(lines, bar)
+	lines = append(lines, PanelValueDim.Render(fmt.Sprintf("$%.2f spent", u.CostUSD)))
+	lines = append(lines, "")
+	lines = append(lines, PanelLabel.Render("model"))
+	lines = append(lines, PanelValue.Render(fit(modelName)))
+	lines = append(lines, "")
+	lines = append(lines, PanelLabel.Render("mode"))
+	lines = append(lines, PanelValue.Render(m.modeName()+" · gate "+gate))
 
-	lines = append(lines, label("model"))
-	lines = append(lines, val(m.cfg.ActiveProvider))
-	lines = append(lines, val(modelName))
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#1a5f7a")).
+		Padding(0, 1).
+		Render(strings.Join(lines, "\n"))
 
-	lines = append(lines, label("mode"))
-	lines = append(lines, val(m.modeName()))
-	lines = append(lines, val("gate "+gate))
-
-	// pad every line to the full panel width so the sidebar reads as a
-	// solid slab, and blank-away any overflow.
-	out := make([]string, 0, h)
-	bg := lipgloss.NewStyle().Background(PanelBG).Render(" ")
-	for i := 0; i < h; i++ {
-		if i < len(lines) {
-			l := lines[i]
-			w := lipgloss.Width(l)
-			if w < side {
-				l += strings.Repeat(" ", side-w)
-			}
-			out = append(out, l)
-		} else {
-			out = append(out, strings.Repeat(bg, side))
+	out := make([]string, h)
+	for i, l := range strings.Split(box, "\n") {
+		if i < h {
+			out[i] = l
 		}
 	}
 	return out
+}
+
+// ansiTrunc truncates a styled string to n cells.
+func ansiTrunc(s string, n int) string {
+	if lipgloss.Width(s) <= n {
+		return s
+	}
+	return ansi.Truncate(s, n, "…")
 }

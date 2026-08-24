@@ -118,6 +118,45 @@ func TestStatusBarNarrow(t *testing.T) {
 	}
 }
 
+// TestPanelBoxFloats checks the info box renders as a bordered box on
+// water: border rows present, water-only rows around/below it, and the
+// box never exceeds its sidebar band even with a long model name.
+func TestPanelBoxFloats(t *testing.T) {
+	m := newTestModel(120, 28)
+	m.cfg.Providers["openai"].Model = "gemini-2.5-flash-a-very-long-model-name-indeed"
+	m.entries = append(m.entries, entry{kind: "user", text: "hi"})
+	rows := strings.Split(m.View(), "\n")
+
+	if testing.Verbose() {
+		for _, r := range rows {
+			t.Logf("|%s|", stripANSI(r))
+		}
+	}
+
+	boxRows := 0
+	for _, r := range rows {
+		plain := stripANSI(r)
+		if strings.Contains(plain, "╭") || strings.Contains(plain, "│") || strings.Contains(plain, "╰") {
+			boxRows++
+		}
+	}
+	if boxRows < 10 {
+		t.Fatalf("expected a bordered info box, saw %d border rows", boxRows)
+	}
+
+	panel := m.panelContent(28)
+	for i, p := range panel {
+		if p != "" && lipgloss.Width(p) > m.sidebar() {
+			t.Errorf("panel row %d overflows sidebar: %d > %d", i, lipgloss.Width(p), m.sidebar())
+		}
+	}
+	for i, r := range rows {
+		if got := lipgloss.Width(r); got != 120 {
+			t.Errorf("row %d width %d != 120", i, got)
+		}
+	}
+}
+
 func assertFullFrame(t *testing.T, m *model, w, h int) {
 	t.Helper()
 	rows := strings.Split(m.View(), "\n")

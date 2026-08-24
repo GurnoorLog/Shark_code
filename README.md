@@ -52,9 +52,15 @@ Commands:
 /exit                       quit
 ```
 
-## Windows notes
+## Works on all systems
 
-The `bash` tool actually invokes cmd.exe on Windows, and common Unix idioms get translated so the model doesn't trip over them: `mkdir -p` becomes `mkdir`, `rm -rf` becomes `rmdir /s /q`, `touch` becomes `type nul >`, and `~` expands to your real home directory. The system prompt also injects your actual username and paths, which stops the model from guessing a wrong home folder and hitting "access denied".
+SHARKCODE runs on Windows, macOS, and Linux. Before your first message it figures out what machine it's on: operating system and architecture, which shell the `bash` tool will actually drive, your real home directory and username, plus an OS version probe (`ver` on Windows, `sw_vers` on macOS, `/etc/os-release` or `uname` on Linux). All of that gets injected into its system prompt, so it acts on facts instead of guessing paths and hitting "access denied".
+
+On Windows the `bash` tool invokes cmd.exe, and common Unix idioms get translated so the model doesn't trip over them: `mkdir -p` becomes `mkdir`, `rm -rf` becomes `rmdir /s /q`, `touch` becomes `type nul >`, and `~` expands to your real home directory.
+
+On macOS and Linux it drives `/bin/sh`, so any distro works: Ubuntu, Debian, Fedora, Arch, Mint, Pop!_OS, openSUSE, Alpine, and the rest. It identifies your specific distro from `/etc/os-release` and knows to reach for apt/dnf/pacman only when something genuinely needs installing.
+
+When things go wrong, it tells you instead of dying quietly: provider hiccups get retried automatically, tool errors go back to the model so it can change approach, and if it hits its step budget it pauses and asks you to say "continue".
 
 ## Build and run
 
