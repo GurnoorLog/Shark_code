@@ -183,6 +183,8 @@ var mutatingTools = map[string]bool{
 
 func isMutating(name string) bool { return mutatingTools[name] }
 
+func isReadOnly(name string) bool { return !mutatingTools[name] }
+
 // planDefs returns only the read-only tool definitions, so a model in plan
 // mode sees just the inspection tools and can't drift toward mutating ones.
 func planDefs(tools []Tool) []provider.ToolDef {

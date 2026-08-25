@@ -19,9 +19,6 @@ import (
 const SystemPrompt = `You are SHARKCODE, a terminal coding agent that runs in the user's terminal. You act like a senior engineer sitting next to them: you plan, run commands, inspect output, and fix problems yourself.
 `
 
-// understandMachineSection is injected right after the platform rules.
-// Grounding is deliberately scoped: small models over-generalize "inspect
-// first" into running directory listings on greetings and simple questions.
 const understandMachineSection = `## First understand the machine
 - Greetings, chit-chat, and pure explanation questions get DIRECT answers: no tool calls, no directory inspection, no permission prompts.
 - For real work that touches files or runs commands, ground yourself first with ONE quick look (list_dir or read_file on the relevant paths), then act.
@@ -98,8 +95,6 @@ Approve when it improves overall health even if imperfect; don't leave the codeb
 Never ask permission to run a read-only or inspection command.
 `
 
-// Platform guidance injected after the base prompt so the model gets the
-// right shell idioms for whatever machine it's running on.
 const windowsSection = `## You are on Windows
 - The "bash" tool actually invokes cmd.exe (Command Prompt), NOT bash.
 - cmd.exe does NOT support: ls, cat, cp, mv, rm -rf, mkdir -p, touch, which, grep (standalone), pwd, apt/brew/yum.
@@ -128,7 +123,6 @@ func platformSection() string {
 	}
 }
 
-// shellName reports which shell the bash tool will actually drive.
 func shellName() string {
 	if runtime.GOOS == "windows" {
 		return "cmd.exe"
@@ -139,8 +133,6 @@ func shellName() string {
 	return "sh"
 }
 
-// detectOSVersion runs one cheap, read-only probe for an authoritative OS
-// string so the model starts from reality instead of guessing the platform.
 func detectOSVersion() string {
 	switch runtime.GOOS {
 	case "windows":
@@ -162,8 +154,6 @@ func detectOSVersion() string {
 	}
 }
 
-// runProbe executes a command with a short timeout; failures are silent
-// because the probe is a nice-to-have, never a requirement.
 func runProbe(name string, args ...string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -174,10 +164,6 @@ func runProbe(name string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// buildSystemPrompt injects the platform guidance plus the real environment
-// facts (OS version, shell, home dir, cwd, username) so the model never has
-// to guess them — a common source of "Access is denied" failures from
-// invented paths like C:\Users\<wrongname>.
 func (a *Agent) buildSystemPrompt() string {
 	home, _ := os.UserHomeDir()
 	cwd, _ := os.Getwd()
@@ -187,9 +173,6 @@ func (a *Agent) buildSystemPrompt() string {
 	}
 
 	var b strings.Builder
-	// Order matters for weak models: OS/shell rules go FIRST (they're the
-	// ones most often violated mid-task), then scoped grounding rules, then
-	// the general working rules, then the machine facts.
 	b.WriteString(SystemPrompt)
 	b.WriteString("\n")
 	b.WriteString(platformSection())
@@ -208,7 +191,6 @@ func (a *Agent) buildSystemPrompt() string {
 	return b.String()
 }
 
-// probeFacts caches the one-time OS version probe on the agent.
 func (a *Agent) probeFacts() string {
 	if !a.sysProbed {
 		a.sysProbe = detectOSVersion()
@@ -244,15 +226,10 @@ type Agent struct {
 	// and bash) are blocked so the model plans without changing anything.
 	Plan bool
 
-	// usedTools is set whenever the current turn executes at least one tool.
-	// The accuracy gate only runs after tool-using turns.
-	usedTools bool
+	usedMutating bool
 
-	// failStreak counts consecutive failed tool calls so the agent can be
-	// nudged to change approach instead of retrying the same thing forever.
 	failStreak int
 
-	// sysProbe caches the one-time OS version probe for the system prompt.
 	sysProbe   string
 	sysProbed  bool
 
@@ -320,9 +297,7 @@ type TurnEvent struct {
 	Text    string
 }
 
-// parseArgs robustly decodes tool arguments. Some providers (e.g. Ollama)
-// return arguments as a double-encoded JSON string rather than an object.
-func parseArgs(raw string) map[string]any {
+func ParseArgs(raw string) map[string]any {
 	var m map[string]any
 	if len(raw) == 0 {
 		return m
@@ -367,7 +342,7 @@ func (a *Agent) Turn(ctx context.Context, userMsg string, onEvent func(TurnEvent
 	// diagnosis/fix pass. Without this guard the gate asks the model to
 	// "review the work above" on every turn, which makes small models
 	// hallucinate fake tasks (e.g. greeting turns inventing file work).
-	if a.Verify && !a.Plan && len(content) > 0 && a.usedTools {
+	if a.Verify && !a.Plan && len(content) > 0 && a.usedMutating {
 		if onEvent != nil {
 			onEvent(TurnEvent{Type: "think", Text: "gate: verifying & diagnosing..."})
 		}
@@ -375,7 +350,7 @@ func (a *Agent) Turn(ctx context.Context, userMsg string, onEvent func(TurnEvent
 			Role:    provider.RoleUser,
 			Content: "Accuracy gate: critically review the task and your work above. Diagnose any failures, mistakes, or unfinished parts, and FIX them using your tools. When everything is correct and complete, give the final answer.",
 		})
-		a.usedTools = false
+		a.usedMutating = false
 		fixed, ferr := a.runLoop(ctx, prov, onEvent, false)
 		if ferr == nil && strings.TrimSpace(fixed) != "" {
 			content = fixed
@@ -385,8 +360,6 @@ func (a *Agent) Turn(ctx context.Context, userMsg string, onEvent func(TurnEvent
 	return content, nil
 }
 
-// safeCall runs a tool and converts a panic into a normal error so one
-// bad tool call can never take down the whole app.
 func safeCall(fn func(context.Context, map[string]any) (string, error), ctx context.Context, args map[string]any) (res string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -424,8 +397,6 @@ func (a *Agent) runLoop(ctx context.Context, prov provider.Provider, onEvent fun
 			}
 			resp, err = call()
 			if err != nil {
-				// Transient errors (network, 429, server overload) get
-				// retried with backoff instead of killing the turn.
 				if attempt < 2 && ctx.Err() == nil {
 					if onEvent != nil {
 						onEvent(TurnEvent{Type: "think", Text: fmt.Sprintf("provider hiccup (%s) — retrying...", short(err.Error(), 60))})
@@ -474,22 +445,21 @@ func (a *Agent) runLoop(ctx context.Context, prov provider.Provider, onEvent fun
 				})
 				continue
 			}
-			// Permission gate: ask the user before touching anything.
-			if a.Confirm != nil && !a.Confirm(ConfirmRequest{Tool: tc.Name, Args: tc.Arguments}) {
-				a.messages = append(a.messages, provider.Message{
-					Role: provider.RoleTool, ToolCallID: tc.ID, ToolName: tc.Name,
-					Content: "The user denied this action. Do not attempt it again; explain what you need permission for instead.",
-				})
-				continue
+			if !isReadOnly(tc.Name) {
+				a.usedMutating = true
+				if a.Confirm != nil && !a.Confirm(ConfirmRequest{Tool: tc.Name, Args: tc.Arguments}) {
+					a.messages = append(a.messages, provider.Message{
+						Role: provider.RoleTool, ToolCallID: tc.ID, ToolName: tc.Name,
+						Content: "The user denied this action. Do not attempt it again; explain what you need permission for instead.",
+					})
+					continue
+				}
 			}
-			a.usedTools = true
-			args := parseArgs(tc.Arguments)
+			args := ParseArgs(tc.Arguments)
 			result, err := safeCall(fn, ctx, args)
 			if err != nil {
 				a.failStreak++
 				result = "tool error: " + err.Error()
-				// After repeated failures tell the model to change tack
-				// instead of hammering the same call — and tell the user.
 				if a.failStreak >= 3 {
 					if onEvent != nil && emitToolEvents {
 						onEvent(TurnEvent{Type: "think", Text: fmt.Sprintf("%s failed %d times — switching approach", tc.Name, a.failStreak)})
@@ -508,9 +478,6 @@ func (a *Agent) runLoop(ctx context.Context, prov provider.Provider, onEvent fun
 		}
 	}
 
-	// Step budget exhausted: tell the user instead of hard-failing the
-	// turn, so any progress made so far stays visible and they can ask
-	// us to continue.
 	if onEvent != nil {
 		onEvent(TurnEvent{Type: "error", Text: fmt.Sprintf("hit the step budget (%d steps). Task paused, not failed — say \"continue\" to keep going.", a.maxSteps)})
 	}
@@ -527,3 +494,4 @@ func (a *Agent) GetModel() string {
 }
 
 var _ = log.Println
+

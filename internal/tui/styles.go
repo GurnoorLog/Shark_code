@@ -89,7 +89,6 @@ var (
 			Foreground(Bubble).
 			Bold(true)
 
-	// QueueChip labels messages typed while the agent is mid-turn.
 	QueueChip = lipgloss.NewStyle().
 			Foreground(DeepBG).
 			Background(Cyan).

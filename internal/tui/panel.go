@@ -8,9 +8,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// sidebar returns the column width of the right info panel band. It
-// shrinks on narrow terminals and disappears entirely below ~78 columns
-// so the chat band never gets crushed.
 func (m *model) sidebar() int {
 	switch {
 	case m.width >= 150:
@@ -24,16 +21,10 @@ func (m *model) sidebar() int {
 	}
 }
 
-// chatWidth returns the column width available to the conversation band
-// (everything left of the sidebar).
 func (m *model) chatWidth() int {
 	return m.width - m.sidebar()
 }
 
-// panelContent builds the right info box: context usage, model, mode and
-// gate inside a rounded border that FLOATS on the water. There is no solid
-// slab behind it: rows without content come back as "" and renderRow fills
-// them with live water, so bubbles rise behind and around the box.
 func (m *model) panelContent(h int) []string {
 	side := m.sidebar()
 	if side <= 0 || h <= 0 {
@@ -64,9 +55,7 @@ func (m *model) panelContent(h int) []string {
 		modelName = p.Model
 	}
 
-	// Everything inside the box must fit within side-4 columns (border +
-	// padding), or the box would grow into the chat band.
-	innerMax := side - 4 - 2 // border(2) + padding(2)
+	innerMax := side - 4 - 2
 	if innerMax < 8 {
 		innerMax = 8
 	}
@@ -106,7 +95,6 @@ func (m *model) panelContent(h int) []string {
 	return out
 }
 
-// ansiTrunc truncates a styled string to n cells.
 func ansiTrunc(s string, n int) string {
 	if lipgloss.Width(s) <= n {
 		return s

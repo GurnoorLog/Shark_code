@@ -15,7 +15,6 @@ var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
 
 func stripANSI(s string) string { return ansiRe.ReplaceAllString(s, "") }
 
-// newTestModel builds a model sized to a fake terminal.
 func newTestModel(w, h int) *model {
 	m := &model{width: w, height: h}
 	m.cfg = testConfig()
@@ -25,9 +24,6 @@ func newTestModel(w, h int) *model {
 	return m
 }
 
-// TestWelcomeTiers checks the welcome screen degrades gracefully: full
-// braille art on tall terminals, the compact mark in between, text-only
-// when nothing else fits.
 func TestWelcomeTiers(t *testing.T) {
 	cases := []struct {
 		w, h    int
@@ -51,9 +47,6 @@ func TestWelcomeTiers(t *testing.T) {
 	}
 }
 
-// TestNoBlackEdges guards the row-compositing invariant: every rendered
-// row must span the terminal width exactly. A short row leaves unstyled
-// black at the edges; a long row wraps and shifts everything below it.
 func TestNoBlackEdges(t *testing.T) {
 	for _, sz := range [][2]int{{120, 46}, {100, 30}, {80, 24}} {
 		m := newTestModel(sz[0], sz[1])
@@ -69,7 +62,6 @@ func TestNoBlackEdges(t *testing.T) {
 	}
 }
 
-// TestChatFrameLayout applies the same invariant to the chat view.
 func TestChatFrameLayout(t *testing.T) {
 	m := newTestModel(110, 32)
 	m.entries = append(m.entries,
@@ -87,9 +79,6 @@ func TestChatFrameLayout(t *testing.T) {
 	}
 }
 
-// TestOverlayFramesFullWidth — picker and permission-modal placement used
-// to replace rows with raw centered strings whose side padding was
-// unstyled, leaving black bands around the popups.
 func TestOverlayFramesFullWidth(t *testing.T) {
 	t.Run("picker", func(t *testing.T) {
 		m := newTestModel(100, 30)
@@ -108,7 +97,6 @@ func TestOverlayFramesFullWidth(t *testing.T) {
 	})
 }
 
-// TestStatusBarNarrow — long model names must never wrap the status bar.
 func TestStatusBarNarrow(t *testing.T) {
 	m := newTestModel(60, 20)
 	m.cfg.Providers["openai"].Model = "accounts/fireworks/models/kimi-k2p7-code-rc-extra-long"
@@ -118,9 +106,6 @@ func TestStatusBarNarrow(t *testing.T) {
 	}
 }
 
-// TestPanelBoxFloats checks the info box renders as a bordered box on
-// water: border rows present, water-only rows around/below it, and the
-// box never exceeds its sidebar band even with a long model name.
 func TestPanelBoxFloats(t *testing.T) {
 	m := newTestModel(120, 28)
 	m.cfg.Providers["openai"].Model = "gemini-2.5-flash-a-very-long-model-name-indeed"

@@ -5,9 +5,6 @@ import (
 	"testing"
 )
 
-// TestSystemPromptOrder — platform rules must come before the grounding
-// rules and general rules. Burying OS-specific guidance at the end of a
-// long prompt made weak models ignore it mid-task.
 func TestSystemPromptOrder(t *testing.T) {
 	a := New(nil)
 	p := a.buildSystemPrompt()
@@ -31,7 +28,6 @@ func TestSystemPromptOrder(t *testing.T) {
 		}
 	}
 
-	// Greetings must be explicitly excluded from inspection behavior.
 	if !strings.Contains(p, "no tool calls") {
 		t.Error("grounding rules no longer scope inspections away from greetings")
 	}

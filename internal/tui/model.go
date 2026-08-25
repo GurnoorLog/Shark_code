@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -89,9 +90,6 @@ type model struct {
 	// the agent may only read/think and must not modify anything.
 	plan bool
 
-	// queue holds messages typed while the agent was mid-turn. They render
-	// pinned just above the input ("queued") and run sequentially when the
-	// current turn finishes instead of racing the running one.
 	queue []string
 }
 
@@ -156,7 +154,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.err != nil {
 				m.entries = append(m.entries, entry{kind: "error", text: msg.err.Error()})
 			}
-			// A message was typed while the shark was working: run it now.
 			if len(m.queue) > 0 {
 				next := m.queue[0]
 				m.queue = m.queue[1:]
@@ -456,9 +453,7 @@ func (m *model) menuMatches() []cmdInfo {
 	return out
 }
 
-// applyCommand resolves the highlighted autocomplete item. It returns the
-// command's tea.Cmd (e.g. tea.Quit for /exit) — dropping it used to make
-// /exit silently do nothing.
+// applyCommand resolves the highlighted autocomplete item.
 func (m *model) applyCommand(item cmdInfo) tea.Cmd {
 	var cmd tea.Cmd
 	switch item.name {
@@ -542,8 +537,6 @@ func (m *model) submit(line string) tea.Cmd {
 	// Record the prompt in history for ↑/↓ recall.
 	trimmed := strings.TrimSpace(line)
 	if strings.HasPrefix(trimmed, "/") {
-		// Slash commands run immediately, even mid-turn: /exit must quit
-		// while the shark is working, not get queued behind it.
 		return m.handleCommand(trimmed)
 	}
 	if trimmed != "" && (len(m.history) == 0 || m.history[len(m.history)-1] != trimmed) {
@@ -551,7 +544,6 @@ func (m *model) submit(line string) tea.Cmd {
 	}
 	m.histIdx = len(m.history)
 
-	// Mid-turn messages queue up instead of racing the running turn.
 	if m.busy {
 		m.queue = append(m.queue, trimmed)
 		return nil
@@ -574,8 +566,6 @@ func (m *model) submit(line string) tea.Cmd {
 	// The callback blocks (in the agent goroutine) until the UI answers.
 	m.ag.Confirm = func(req agent.ConfirmRequest) bool {
 		reply := make(chan bool, 1)
-		// Register the reply channel BEFORE announcing the request, so the
-		// modal renders on the very first frame of the event (no flicker).
 		m.confirmReply = reply
 		select {
 		case ch <- turnEventMsg{ev: agent.TurnEvent{Type: "confirm", Tool: req.Tool, Text: req.Args}}:
@@ -631,9 +621,11 @@ func (m *model) nextStream() tea.Cmd {
 func (m *model) pushEvent(ev agent.TurnEvent) {
 	switch ev.Type {
 	case "tool":
-		m.entries = append(m.entries, entry{kind: "tool", text: "fins up → " + ev.Tool + " " + truncate(ev.Args, 80)})
+		m.streaming = false
+		m.entries = append(m.entries, entry{kind: "tool", text: "fins up → " + ev.Tool + " " + prettyArgs(ev.Args)})
 	case "tool_result":
-		m.entries = append(m.entries, entry{kind: "tool_result", text: truncate(ev.Result, 300)})
+		m.streaming = false
+		m.entries = append(m.entries, entry{kind: "tool_result", text: truncate(strings.TrimSpace(ev.Result), 300)})
 	case "token":
 		// Live streamed reply text: accumulate into the current assistant entry.
 		if !m.streaming {
@@ -658,10 +650,28 @@ func (m *model) pushEvent(ev agent.TurnEvent) {
 	case "error":
 		m.entries = append(m.entries, entry{kind: "error", text: ev.Text})
 	case "confirm":
+		m.streaming = false
 		m.confirmTool = ev.Tool
 		m.confirmArgs = ev.Text
-		m.entries = append(m.entries, entry{kind: "confirm", text: ev.Tool + " " + ev.Text})
+		m.entries = append(m.entries, entry{kind: "confirm", text: ev.Tool + " " + prettyArgs(ev.Text)})
 	}
+}
+
+func prettyArgs(raw string) string {
+	m := agent.ParseArgs(raw)
+	if len(m) == 0 {
+		return truncate(raw, 80)
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(m))
+	for _, k := range keys {
+		parts = append(parts, k+"="+truncate(fmt.Sprint(m[k]), 60))
+	}
+	return strings.Join(parts, " ")
 }
 
 func (m *model) handleCommand(line string) tea.Cmd {
@@ -861,16 +871,11 @@ func (m *model) View() string {
 	welcome := !m.picker && !m.busy && !m.hasChat()
 
 	if welcome {
-		// Flatten every element to single physical lines FIRST. Writing a
-		// multi-line string (the logo!) into one bg row injects raw newlines
-		// into the frame, shifting all later rows down and leaving unstyled
-		// black bands at the bottom of the screen.
 		overlay := m.welcomeLines()
 		var flat []string
 		for _, l := range overlay {
 			flat = append(flat, strings.Split(l, "\n")...)
 		}
-		// Slightly above optical center looks better than dead-center.
 		start := (len(bg) - len(flat)) * 2 / 5
 		if start < 0 {
 			start = 0
@@ -909,10 +914,6 @@ func (m *model) View() string {
 		// Build the right info panel once per frame.
 		panel := m.panelContent(len(bg))
 
-		// Compose EVERY row through renderRow so the floating info box is
-		// continuous down the screen and the sea backs all of them.
-		// (Drawing only content rows made the panel stop where the chat
-		// log ended.)
 		if len(bg) > 0 {
 			bg[0] = m.renderRow(header, 0, panel)
 		}
@@ -948,9 +949,6 @@ func (m *model) View() string {
 		for i, pl := range pickLines {
 			row := start + i
 			if row >= 0 && row < len(bg) {
-				// Back the picker with the sea: the box is narrower than
-				// the terminal, and raw placement would leave unstyled
-				// black bands on both sides of it.
 				bg[row] = m.seaLine(pl, row)
 			}
 		}
@@ -967,8 +965,6 @@ func (m *model) View() string {
 		for i, ml := range modalLines {
 			row := start + i
 			if row >= 0 && row < len(bg) {
-				// Same sea-backing as the picker — center() pads with
-				// plain spaces that would otherwise render black.
 				bg[row] = m.seaLine(ml, row)
 			}
 		}
@@ -984,10 +980,7 @@ func (m *model) seaLine(line string, y int) string {
 	return m.seaTo(line, y, m.width)
 }
 
-// renderRow lays out one terminal row with the sea behind it: the chat
-// content occupies the left band (up to chatWidth) and the info box floats
-// on water in the right band. Empty panel rows stay pure water so bubbles
-// rise past the box.
+// renderRow lays out one terminal row with the sea behind it.
 func (m *model) renderRow(line string, y int, panel []string) string {
 	side := m.sidebar()
 	if side <= 0 {
@@ -995,8 +988,6 @@ func (m *model) renderRow(line string, y int, panel []string) string {
 	}
 	left := m.seaTo(line, y, m.chatWidth())
 	if y >= 0 && y < len(panel) && panel[y] != "" {
-		// seaTo backs the box line with water and fills whatever is left
-		// of the band, so bubbles flow behind and beside it.
 		return left + m.seaTo(panel[y], y, side)
 	}
 	return left + m.water.Seg(y, m.chatWidth(), m.width)
@@ -1010,8 +1001,6 @@ func (m *model) seaTo(line string, y, width int) string {
 	if tw < 0 {
 		tw = 0
 	}
-	// Never let a row overflow: a wrapped line shifts everything below it
-	// and shows unstyled black at the screen edges.
 	if width > 0 && tw > width {
 		line = ansi.Truncate(line, width, "")
 		tw = width
@@ -1039,8 +1028,6 @@ func (m *model) seaTo(line string, y, width int) string {
 }
 
 // welcomeLines builds the centered landing view (opencode-style).
-// Every element is a single logical block; View() flattens embedded
-// newlines before placing lines into background rows.
 func (m *model) welcomeLines() []string {
 	p := m.cfg.Active()
 	modelName := "none"
@@ -1066,7 +1053,6 @@ func (m *model) welcomeLines() []string {
 	logo := SharkLogo()
 	ctxLine := center(HintStyle.Render(m.contextLine()), m.width)
 
-	// Core controls (no art). Order: title → input → help → status.
 	core := []string{
 		center(title, m.width),
 		center(tagline, m.width),
@@ -1079,8 +1065,7 @@ func (m *model) welcomeLines() []string {
 		center(status, m.width),
 	}
 
-	// Pick the richest variant that physically fits the terminal so no
-	// row ever spills past the bottom edge (that's what caused black bands).
+	var lines []string
 	count := func(ls []string) int {
 		n := 0
 		for _, l := range ls {
@@ -1088,7 +1073,6 @@ func (m *model) welcomeLines() []string {
 		}
 		return n
 	}
-	var lines []string
 	mark := center(SharkMark(), m.width)
 	full := append([]string{"", logo, ""}, core...)
 	withMark := append([]string{mark, ""}, core...)
@@ -1185,9 +1169,6 @@ func (m *model) statusBar() string {
 	need := lipgloss.Width(left) + lipgloss.Width(right) + 2
 	filler := m.width - need
 	if filler < 0 {
-		// Bar longer than the terminal (long model name): trim the right
-		// side so the row never wraps — a wrapped status bar shifts the
-		// whole frame and shows black at the bottom edge.
 		right = ansi.Truncate(right, max(0, m.width-lipgloss.Width(left)-3), "…")
 		filler = m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
 	}
@@ -1195,7 +1176,6 @@ func (m *model) statusBar() string {
 		filler = 0
 	}
 	space := lipgloss.NewStyle().Background(DeepBG).Render(strings.Repeat(" ", filler))
-	// Every cell styled — even the padding — or it renders as black.
 	return StatusBar.Render(" "+left) + space + StatusBar.Render(right+" ")
 }
 
@@ -1291,8 +1271,6 @@ func (m *model) chatLines() (header string, body, footer []string) {
 		}
 	}
 	body = overlay[1:]
-	// Queued messages stay pinned right above the input so they're always
-	// visible no matter how far the log is scrolled.
 	for _, q := range m.queue {
 		footer = append(footer, QueueChip.Render(" ⏳ queued ")+" "+BodyStyle.Render(truncate(q, 70)))
 	}
