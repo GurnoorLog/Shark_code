@@ -88,6 +88,11 @@ type model struct {
 	// plan toggles PLAN vs BUILD mode (Tab, opencode-style). In plan mode
 	// the agent may only read/think and must not modify anything.
 	plan bool
+
+	// queue holds messages typed while the agent was mid-turn. They render
+	// pinned just above the input ("queued") and run sequentially when the
+	// current turn finishes instead of racing the running one.
+	queue []string
 }
 
 type localModelsMsg struct{ models []provider.LocalModel }
@@ -150,6 +155,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = false
 			if msg.err != nil {
 				m.entries = append(m.entries, entry{kind: "error", text: msg.err.Error()})
+			}
+			// A message was typed while the shark was working: run it now.
+			if len(m.queue) > 0 {
+				next := m.queue[0]
+				m.queue = m.queue[1:]
+				return m, m.submit(next)
 			}
 			return m, nil
 		}
@@ -250,8 +261,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "tab", "enter":
-				m.applyCommand(matches[m.autoIdx])
-				return m, nil
+				return m, m.applyCommand(matches[m.autoIdx])
 			case "backspace":
 				if len(m.input) > 0 {
 					rs := []rune(m.input)
@@ -446,8 +456,11 @@ func (m *model) menuMatches() []cmdInfo {
 	return out
 }
 
-// applyCommand resolves the highlighted autocomplete item.
-func (m *model) applyCommand(item cmdInfo) {
+// applyCommand resolves the highlighted autocomplete item. It returns the
+// command's tea.Cmd (e.g. tea.Quit for /exit) — dropping it used to make
+// /exit silently do nothing.
+func (m *model) applyCommand(item cmdInfo) tea.Cmd {
+	var cmd tea.Cmd
 	switch item.name {
 	case "/model":
 		m.input = ""
@@ -456,9 +469,10 @@ func (m *model) applyCommand(item cmdInfo) {
 		m.input = "/key "
 	default:
 		m.input = ""
-		m.handleCommand(item.name)
+		cmd = m.handleCommand(item.name)
 	}
 	m.autoIdx = 0
+	return cmd
 }
 
 // openPicker starts provider selection.
@@ -527,13 +541,21 @@ func (m *model) discoverLocalCmd() tea.Cmd {
 func (m *model) submit(line string) tea.Cmd {
 	// Record the prompt in history for ↑/↓ recall.
 	trimmed := strings.TrimSpace(line)
-	if strings.HasPrefix(line, "/") {
-		return m.handleCommand(line)
+	if strings.HasPrefix(trimmed, "/") {
+		// Slash commands run immediately, even mid-turn: /exit must quit
+		// while the shark is working, not get queued behind it.
+		return m.handleCommand(trimmed)
 	}
 	if trimmed != "" && (len(m.history) == 0 || m.history[len(m.history)-1] != trimmed) {
 		m.history = append(m.history, trimmed)
 	}
 	m.histIdx = len(m.history)
+
+	// Mid-turn messages queue up instead of racing the running turn.
+	if m.busy {
+		m.queue = append(m.queue, trimmed)
+		return nil
+	}
 
 	m.entries = append(m.entries, entry{kind: "user", text: line})
 	m.busy = true
@@ -1249,7 +1271,7 @@ func (m *model) chatLines() (header string, body, footer []string) {
 		}
 	}
 	input := PromptStyle.Render("> ") + BodyStyle.Render(inputText+"▌")
-	hint := HintStyle.Render("type / to see commands · tab = plan/build · esc esc = cancel")
+	hint := HintStyle.Render("type / for commands · tab plan/build · type while busy to queue · esc esc cancel")
 
 	overlay := []string{HeaderStyle.Width(m.width).Render(status)}
 	pad := strings.Repeat(" ", 2)
@@ -1269,6 +1291,11 @@ func (m *model) chatLines() (header string, body, footer []string) {
 		}
 	}
 	body = overlay[1:]
+	// Queued messages stay pinned right above the input so they're always
+	// visible no matter how far the log is scrolled.
+	for _, q := range m.queue {
+		footer = append(footer, QueueChip.Render(" ⏳ queued ")+" "+BodyStyle.Render(truncate(q, 70)))
+	}
 	footer = append(footer, "", input, hint)
 
 	if matches := m.menuMatches(); len(matches) > 0 {

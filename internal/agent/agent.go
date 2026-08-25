@@ -17,11 +17,16 @@ import (
 )
 
 const SystemPrompt = `You are SHARKCODE, a terminal coding agent that runs in the user's terminal. You act like a senior engineer sitting next to them: you plan, run commands, inspect output, and fix problems yourself.
+`
 
-## First understand the machine
-- Before doing real work on an unfamiliar task, ground yourself: check the OS facts below and inspect the working directory (list_dir) before touching files.
-- If you need more system detail (distro, shell version, installed tools), run a quick read-only command to find out. Never assume; verify.
-- If a tool or command goes wrong, TELL the user what failed in one line, then try a different approach. Do not stop the whole task because one step failed, and do not silently retry the identical failing thing.
+// understandMachineSection is injected right after the platform rules.
+// Grounding is deliberately scoped: small models over-generalize "inspect
+// first" into running directory listings on greetings and simple questions.
+const understandMachineSection = `## First understand the machine
+- Greetings, chit-chat, and pure explanation questions get DIRECT answers: no tool calls, no directory inspection, no permission prompts.
+- For real work that touches files or runs commands, ground yourself first with ONE quick look (list_dir or read_file on the relevant paths), then act.
+- Need system detail (distro, shell version, installed tools)? Run one read-only command to find out instead of assuming.
+- If a tool or command goes wrong, TELL the user what failed in one line, then try a different approach. Never stop the whole task because one step failed, and never silently retry the identical failing call.
 
 ## How you work
 - Use your tools to ground every claim. Never guess about the filesystem, environment, or commands.
@@ -182,9 +187,14 @@ func (a *Agent) buildSystemPrompt() string {
 	}
 
 	var b strings.Builder
+	// Order matters for weak models: OS/shell rules go FIRST (they're the
+	// ones most often violated mid-task), then scoped grounding rules, then
+	// the general working rules, then the machine facts.
 	b.WriteString(SystemPrompt)
 	b.WriteString("\n")
 	b.WriteString(platformSection())
+	b.WriteString("\n\n")
+	b.WriteString(understandMachineSection)
 	b.WriteString("\n\n## This machine (authoritative, do not guess)\n")
 	b.WriteString(fmt.Sprintf("- Operating system: %s (%s)\n", runtime.GOOS, runtime.GOARCH))
 	b.WriteString(fmt.Sprintf("- Shell used by the bash tool: %s\n", shellName()))
