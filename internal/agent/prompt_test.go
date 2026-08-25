@@ -13,22 +13,29 @@ func TestSystemPromptOrder(t *testing.T) {
 	if iPlatform < 0 {
 		t.Fatal("platform section missing from system prompt")
 	}
-	iGround := strings.Index(p, "## First understand the machine")
-	iRules := strings.Index(p, "## How you work")
-	iMachine := strings.Index(p, "## This machine")
-	for _, tc := range []struct {
-		name string
-		idx  int
-	}{{"grounding", iGround}, {"rules", iRules}, {"machine facts", iMachine}} {
-		if tc.idx < 0 {
-			t.Fatalf("%s section missing", tc.name)
+
+	for _, sec := range []string{
+		"## Step 1 - classify every request",
+		"## Step 2 - work the task one tool call at a time",
+		"## Step 3 - finish properly",
+	} {
+		i := strings.Index(p, sec)
+		if i < 0 {
+			t.Fatalf("section %q missing", sec)
 		}
-		if tc.idx < iPlatform {
-			t.Errorf("%s section should come after platform rules", tc.name)
+		if i > iPlatform && strings.HasPrefix(sec, "## Step") {
+			t.Errorf("section %q must come before platform rules so it is read first", sec)
 		}
 	}
 
-	if !strings.Contains(p, "no tool calls") {
-		t.Error("grounding rules no longer scope inspections away from greetings")
+	iMachine := strings.Index(p, "## This machine")
+	if iMachine < 0 || iMachine < iPlatform {
+		t.Fatal("machine facts must follow the platform rules")
+	}
+
+	for _, want := range []string{"answer directly. No tools", "NEVER end your turn mid-task", "mkdir"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing rule containing %q", want)
+		}
 	}
 }

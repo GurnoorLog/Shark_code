@@ -39,7 +39,7 @@ func AllTools() []Tool {
 		{
 			Def: provider.ToolDef{
 				Name:        "bash",
-				Description: "Run a shell command in the working directory. Use for installing dependencies, running tests, git, creating directories (mkdir), copying/moving/deleting files, etc.",
+				Description: "Run a shell command. Use for running programs/tests, git, installing dependencies, and creating FOLDERS (mkdir). Do NOT create file contents with shell redirects - use write_file.",
 				Parameters: JSONSchema([]string{"command"}, map[string]any{
 					"command": StrProp("The shell command to run"),
 				}),
@@ -49,7 +49,7 @@ func AllTools() []Tool {
 		{
 			Def: provider.ToolDef{
 				Name:        "read_file",
-				Description: "Read a file from disk. Returns the contents.",
+				Description: "Read a file's contents. Always read a file before editing or overwriting it.",
 				Parameters: JSONSchema([]string{"path"}, map[string]any{
 					"path": StrProp("Absolute or relative path to the file (supports ~ for home)"),
 				}),
@@ -101,7 +101,7 @@ func AllTools() []Tool {
 		{
 			Def: provider.ToolDef{
 				Name:        "edit_file",
-				Description: "Find an exact old string in a file and replace it with a new string. The old string must be unique in the file. Use this for targeted edits instead of rewriting whole files.",
+				Description: "Replace an exact unique old_string with new_string in an EXISTING file. Use for targeted edits. For new files or full rewrites use write_file.",
 				Parameters: JSONSchema([]string{"path", "old_string", "new_string"}, map[string]any{
 					"path":       StrProp("Path to the file to edit (supports ~ for home)"),
 					"old_string": StrProp("Exact text to find (must be unique)"),
@@ -257,18 +257,19 @@ func toolRead(_ context.Context, args map[string]any) (string, error) {
 func toolWrite(_ context.Context, args map[string]any) (string, error) {
 	p := expandPath(asStr(args["path"]))
 	content := asStr(args["content"])
-	if strings.TrimSpace(content) == "" {
-		return "", fmt.Errorf("refusing to write an empty file to %s: content is empty. Provide the real file content in the content argument, then call write_file again.", p)
+	trimmedContent := strings.TrimSpace(content)
+	low := strings.ToLower(trimmedContent)
+	if trimmedContent == "" || low == "folder" || low == "directory" || low == "dir" || low == "(folder)" {
+		return "", fmt.Errorf("write_file writes FILE contents but you sent %q. To create a FOLDER use the bash tool: mkdir %q. Then write files inside it with write_file.", short(trimmedContent, 20), p)
 	}
-	// Refuse obvious binary/placeholder stubs — you cannot hand an image to
-	// write_file as [Binary Data]. Use web_fetch to download binaries.
-	low := strings.ToLower(content)
+	if st, err := os.Stat(p); err == nil && st.IsDir() {
+		return "", fmt.Errorf("%s is a directory; write to a file path inside it instead", p)
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return "", fmt.Errorf("cannot create parent directory %s: %v. If a FILE (not a folder) exists at that exact path it blocks this; remove it first with bash: del \"%s\"", filepath.Dir(p), err, filepath.Dir(p))
+	}
 	if strings.Contains(low, "[binary") || strings.Contains(low, "[image") || strings.Contains(low, "\x00") {
 		return "", fmt.Errorf("refusing to write %s: you passed a binary/placeholder marker (%q) as text content. write_file writes TEXT only. To download a binary file (jpg/png/etc.) use download_file, which saves bytes to disk directly.", p, short(content, 30))
-	}
-	dir := filepath.Dir(p)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
 	}
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		return "", err
