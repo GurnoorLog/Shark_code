@@ -54,12 +54,12 @@ type model struct {
 	water   *Water
 
 	// picker state (opencode-style model selector)
-	picker     bool
-	pickLocal  bool
-	pickIdx    int
-	pickOnes   []string
-	pickTwo    map[string][]string
-	localMap   map[string]string // model name -> base URL for local
+	picker    bool
+	pickLocal bool
+	pickIdx   int
+	pickOnes  []string
+	pickTwo   map[string][]string
+	localMap  map[string]string // model name -> base URL for local
 
 	// streamCh carries agent events to the UI in real time.
 	streamCh chan turnEventMsg
@@ -91,6 +91,9 @@ type model struct {
 	plan bool
 
 	queue []string
+
+	bodyCache    []string
+	bodyCacheKey uint64
 }
 
 type localModelsMsg struct{ models []provider.LocalModel }
@@ -140,13 +143,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		if m.water != nil {
-			m.water.Tick()
-		}
 		if m.busy {
 			m.spinner++
 		}
-		return m, tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
+		if m.water != nil {
+			m.water.Tick()
+		}
+		rate := 500 * time.Millisecond
+		if m.busy {
+			rate = 250 * time.Millisecond
+		}
+		return m, tea.Tick(rate, func(t time.Time) tea.Msg { return tickMsg(t) })
 
 	case turnEventMsg:
 		if msg.done {
@@ -1018,11 +1025,13 @@ func (m *model) seaTo(line string, y, width int) string {
 	// styled blobs (error JSON, tool results, help text) contain interior
 	// "\x1b[0m" sequences that otherwise clear the background back to the
 	// terminal default (black), leaving black patches behind the letters.
-	seq := lipgloss.NewStyle().Background(col).Render("A")
-	if i := strings.Index(seq, "A"); i >= 0 {
-		seq = seq[:i]
-		styled = strings.ReplaceAll(styled, "\x1b[0m", "\x1b[0m"+seq)
-		styled = strings.ReplaceAll(styled, "\x1b[m", "\x1b[m"+seq)
+	if strings.IndexByte(line, '\x1b') >= 0 {
+		seq := lipgloss.NewStyle().Background(col).Render("A")
+		if i := strings.Index(seq, "A"); i >= 0 {
+			seq = seq[:i]
+			styled = strings.ReplaceAll(styled, "\x1b[0m", "\x1b[0m"+seq)
+			styled = strings.ReplaceAll(styled, "\x1b[m", "\x1b[m"+seq)
+		}
 	}
 	return styled
 }
@@ -1208,31 +1217,8 @@ func (m *model) chatLines() (header string, body, footer []string) {
 		status = fmt.Sprintf("  🦈 %s · %s · %s · [%s]", m.cfg.ActiveProvider, frames[m.spinner%len(frames)], modelName, m.modeName())
 	}
 
-	var parts []string
-	for _, e := range m.entries {
-		switch e.kind {
-		case "user":
-			parts = append(parts, UserChip.Render("you 🐟")+"\n"+BodyStyle.Render(displayUserText(e.text)))
-		case "assistant":
-			rich := renderRich(e.text)
-			body := strings.Join(rich, "\n")
-			parts = append(parts, SharkChip.Render("🦈 shark")+"\n"+body)
-		case "tool":
-			parts = append(parts, HintStyle.Render("  · " + e.text))
-		case "tool_result":
-			parts = append(parts, HintStyle.Render("  · " + e.text))
-		case "error":
-			parts = append(parts, ErrorStyle.Render("⚠ " + e.text))
-		case "system":
-			parts = append(parts, HintStyle.Render("· " + e.text))
-		case "confirm":
-			parts = append(parts, CoralLabel.Render("permission needed → " + e.text))
-		case "help":
-			rich := renderRich(e.text)
-			parts = append(parts, strings.Join(rich, "\n"))
-		}
-	}
-	content := strings.Join(parts, "\n"+WaveDivider+"\n")
+	header = HeaderStyle.Width(m.width).Render(status)
+	body = m.chatBody()
 
 	// Live confirmation prompt while the agent waits for approval.
 	// A multi-line input (e.g. a big paste) is shown collapsed as
@@ -1253,24 +1239,6 @@ func (m *model) chatLines() (header string, body, footer []string) {
 	input := PromptStyle.Render("> ") + BodyStyle.Render(inputText+"▌")
 	hint := HintStyle.Render("type / for commands · tab plan/build · type while busy to queue · esc esc cancel")
 
-	overlay := []string{HeaderStyle.Width(m.width).Render(status)}
-	pad := strings.Repeat(" ", 2)
-	padLen := lipgloss.Width(pad)
-	wrapW := m.chatWidth() - padLen - 2 // 2-space breathing room on the right
-	if wrapW < 20 {
-		wrapW = 20
-	}
-	contentLines := strings.Split(content, "\n")
-	for _, cl := range contentLines {
-		if strings.TrimSpace(cl) == "" {
-			overlay = append(overlay, "")
-			continue
-		}
-		for _, wl := range strings.Split(ansi.Wrap(cl, wrapW, " \t/\\"), "\n") {
-			overlay = append(overlay, pad+wl)
-		}
-	}
-	body = overlay[1:]
 	for _, q := range m.queue {
 		footer = append(footer, QueueChip.Render(" ⏳ queued ")+" "+BodyStyle.Render(truncate(q, 70)))
 	}
@@ -1282,7 +1250,74 @@ func (m *model) chatLines() (header string, body, footer []string) {
 			footer = append(footer, ml)
 		}
 	}
-	return overlay[0], body, footer
+	return header, body, footer
+}
+
+// chatBody returns the styled, wrapped chat log. It is memoized on a cheap
+// fingerprint of the render inputs (screen width + entry-history tail) so
+// keypresses and animation ticks don't re-run markdown styling each frame.
+func (m *model) chatBody() []string {
+	key := uint64(m.width)*1099511628211 ^ uint64(len(m.entries))
+	if n := len(m.entries); n > 0 {
+		e := m.entries[n-1]
+		key = key*1099511628211 ^ uint64(len(e.kind))
+		for _, c := range e.kind {
+			key = key*1099511628211 ^ uint64(c)
+		}
+		key = key*1099511628211 ^ uint64(len(e.text))
+		for _, c := range e.text {
+			key = key*1099511628211 ^ uint64(c)
+		}
+	}
+	if m.bodyCache != nil && m.bodyCacheKey == key {
+		return m.bodyCache
+	}
+
+	var parts []string
+	for _, e := range m.entries {
+		switch e.kind {
+		case "user":
+			parts = append(parts, UserChip.Render("you 🐟")+"\n"+BodyStyle.Render(displayUserText(e.text)))
+		case "assistant":
+			rich := renderRich(e.text)
+			body := strings.Join(rich, "\n")
+			parts = append(parts, SharkChip.Render("🦈 shark")+"\n"+body)
+		case "tool":
+			parts = append(parts, HintStyle.Render("  · "+e.text))
+		case "tool_result":
+			parts = append(parts, HintStyle.Render("  · "+e.text))
+		case "error":
+			parts = append(parts, ErrorStyle.Render("⚠ "+e.text))
+		case "system":
+			parts = append(parts, HintStyle.Render("· "+e.text))
+		case "confirm":
+			parts = append(parts, CoralLabel.Render("permission needed → "+e.text))
+		case "help":
+			rich := renderRich(e.text)
+			parts = append(parts, strings.Join(rich, "\n"))
+		}
+	}
+	content := strings.Join(parts, "\n"+WaveDivider+"\n")
+
+	pad := strings.Repeat(" ", 2)
+	padLen := lipgloss.Width(pad)
+	wrapW := m.chatWidth() - padLen - 2
+	if wrapW < 20 {
+		wrapW = 20
+	}
+	var body []string
+	for _, cl := range strings.Split(content, "\n") {
+		if strings.TrimSpace(cl) == "" {
+			body = append(body, "")
+			continue
+		}
+		for _, wl := range strings.Split(ansi.Wrap(cl, wrapW, " \t/\\"), "\n") {
+			body = append(body, pad+wl)
+		}
+	}
+	m.bodyCache = body
+	m.bodyCacheKey = key
+	return body
 }
 
 // confirmPrompt renders the permission request as a centered modal box
@@ -1360,7 +1395,7 @@ func (m *model) renderPicker() string {
 				marker = "▶ "
 				style = MenuSelStyle
 			}
-			b.WriteString(style.Render(marker + label) + "\n")
+			b.WriteString(style.Render(marker+label) + "\n")
 		}
 	} else {
 		for i, model := range m.pickOnes {
