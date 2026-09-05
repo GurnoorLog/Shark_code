@@ -39,6 +39,8 @@ Local models get auto-discovered from your llama-server.
 
 Underwater theme, animated background, bubbles rising behind everything. Replies stream in token by token as they generate. There's an opencode-style model picker, slash-command autocomplete while you type, prompt history with the arrow keys, scrollback with PgUp/PgDn or the mouse wheel, and esc esc to cancel a running task. The status bar tracks tokens spent, cost, and how much of the context window you've used.
 
+Copying a response takes one keypress: hit Ctrl+Y or type /copy to put the latest answer on your clipboard, and /copy 2, /copy 3, and so on to grab older ones. The chat shows a 🦈 msg copied ✓ line when it works. You can also select text the usual terminal way: hold Shift, drag across the words you want, then copy with Ctrl+Shift+C or right-click.
+
 Commands:
 
 ```
@@ -47,6 +49,7 @@ Commands:
 /verify                     toggle the accuracy gate
 /plan / /build              switch modes (Tab does this too)
 /providers                  list providers and models
+/copy [n]                   copy answer to the clipboard (Ctrl+Y too)
 /clear                      fresh conversation
 /help                       all commands
 /exit                       quit

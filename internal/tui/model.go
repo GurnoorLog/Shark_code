@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ var commands = []cmdInfo{
 	{"/plan", "switch to plan mode (read-only) — tab toggles too"},
 	{"/build", "switch to build mode — tab toggles too"},
 	{"/providers", "list providers and their models"},
+	{"/copy", "copy the last answer to the clipboard — /copy [n] for older"},
 	{"/clear", "start a fresh conversation"},
 	{"/help", "show all commands"},
 	{"/exit", "quit sharkcode"},
@@ -99,6 +101,8 @@ type model struct {
 type localModelsMsg struct{ models []provider.LocalModel }
 
 type tickMsg time.Time
+
+type copyMsg struct{ err error }
 
 type turnDoneMsg struct {
 	events []agent.TurnEvent
@@ -171,6 +175,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pushEvent(msg.ev)
 		// keep streaming: pull the next event immediately.
 		return m, m.nextStream()
+
+	case copyMsg:
+		if msg.err != nil {
+			m.entries = append(m.entries, entry{kind: "error", text: "copy failed: " + msg.err.Error()})
+		} else {
+			m.entries = append(m.entries, entry{kind: "system", text: "msg copied ✓"})
+		}
+		return m, nil
 
 	case pickMsg:
 		return m, m.handlePick(msg.idx)
@@ -348,6 +360,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, m.submit(line)
+		case "ctrl+y":
+			return m, m.copyResponse(1)
 		case "backspace":
 			if len(m.input) > 0 {
 				rs := []rune(m.input)
@@ -761,10 +775,42 @@ func (m *model) handleCommand(line string) tea.Cmd {
 	case "/exit", "/quit":
 		return tea.Quit
 
+	case "/copy":
+		n := 1
+		if len(parts) >= 2 {
+			if parsed, err := strconv.Atoi(parts[1]); err == nil && parsed > 0 {
+				n = parsed
+			}
+		}
+		return m.copyResponse(n)
+
 	default:
 		m.entries = append(m.entries, entry{kind: "error", text: "unknown command: " + cmd + " (try /help)"})
 	}
 	return nil
+}
+
+func (m *model) copyResponse(n int) tea.Cmd {
+	text, ok := nthAssistant(m.entries, n)
+	if !ok {
+		m.entries = append(m.entries, entry{kind: "error", text: "no assistant response to copy"})
+		return nil
+	}
+	return func() tea.Msg {
+		return copyMsg{err: copyToClipboard(text)}
+	}
+}
+
+func nthAssistant(entries []entry, n int) (string, bool) {
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].kind == "assistant" {
+			n--
+			if n == 0 {
+				return entries[i].text, true
+			}
+		}
+	}
+	return "", false
 }
 
 func providerNames(cfg *config.Config) []string {
@@ -786,6 +832,8 @@ func helpText() string {
   /verify                toggle the accuracy gate (on/off)
   /plan / /build         switch modes (or press Tab)
   /providers             list providers and their models
+  /copy [n]              copy the last assistant answer to the clipboard
+                         (n = which answer, 1 = most recent, or press Ctrl+Y)
   /clear                 clear conversation
   /help                  this help
   /exit                  quit
@@ -793,6 +841,11 @@ func helpText() string {
 slash autocomplete:
   type "/" then the start of a command (e.g. /mod) and press Enter
   to see live suggestions, navigate with ↑/↓, Enter to pick.
+
+selecting text:
+  hold Shift while dragging selects words inside the chat (native
+  terminal selection) — copy with Ctrl+Shift+C or right-click.
+  Ctrl+Y / /copy copies the latest answer without selecting at all.
 
 providers: openai, anthropic, gemini, fireworks, local
 
@@ -1055,8 +1108,8 @@ func (m *model) welcomeLines() []string {
 	title := TitleStyle.Render("SHARKCODE")
 	tagline := TaglineStyle.Render(m.tagline())
 
-	cmdline := HintStyle.Render("/model · /key · /providers · /clear · /help · /exit")
-	keys := HintStyle.Render("enter send · tab plan/build · ↑↓ history · esc esc cancel")
+	cmdline := HintStyle.Render("/model · /key · /providers · /copy · /clear · /help · /exit")
+	keys := HintStyle.Render("enter send · tab plan/build · ↑↓ history · ctrl+y copy · esc esc cancel")
 	status := HintStyle.Render(fmt.Sprintf("currently: %s (%s)", m.cfg.ActiveProvider, modelName))
 
 	logo := SharkLogo()
@@ -1237,7 +1290,7 @@ func (m *model) chatLines() (header string, body, footer []string) {
 		}
 	}
 	input := PromptStyle.Render("> ") + BodyStyle.Render(inputText+"▌")
-	hint := HintStyle.Render("type / for commands · tab plan/build · type while busy to queue · esc esc cancel")
+	hint := HintStyle.Render("type / for commands · tab plan/build · type while busy to queue · ctrl+y copy · esc esc cancel")
 
 	for _, q := range m.queue {
 		footer = append(footer, QueueChip.Render(" ⏳ queued ")+" "+BodyStyle.Render(truncate(q, 70)))
